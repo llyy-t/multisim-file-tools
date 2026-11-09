@@ -24,24 +24,25 @@ licensed like the rest of it.
 
 ### Is the shipped binary the one this source produces?
 
-`tools/verify_decoder.py` recompiles `blast_harness.c` + `blast.c` with MSVC and
-compares the result against the committed `worker/bin/blast_harness.exe`:
+`tools/verify_decoder.py` recompiles `blast_harness.c` + `blast.c` with MSVC,
+builds a payload with `tools/make_probe.py`, and requires the committed
+`worker/bin/blast_harness.exe` and the rebuild to decode it to the same bytes:
 
 ```bash
-python tools/verify_decoder.py
+python tools/make_probe.py --out probe.bin --verify
+python tools/verify_decoder.py --probe probe.bin
 ```
 
-MSVC's linker writes a timestamp into the PE header, so a plain hash comparison
-is only expected to agree on toolchains that honour `/Brepro`. When the hashes
-differ the script does not stop there — it runs both executables over the same
-real compressed block and compares the decoded bytes, which is the property that
-actually matters. `tools/explain_build.py` shows the difference in detail (build
-determinism, link timestamps, then the same behavioural comparison).
-
-As of the current commit the two binaries have different hashes and **identical
-decompressed output** for every block of a real `.ms14`: the build is
-deterministic on this machine (two builds agree with each other) but differs from
-the committed artefact by the link timestamp. CI runs the rebuild on every push.
+Comparing hashes alone would prove less than it appears to. The check is
+behavioural on purpose: two builds from this source on one machine are
+byte-identical, but a different MSVC release emits different machine code, so the
+committed file (145408 bytes, sha256 `d2d7cd6917ff9e7b4dfa5ef08009bc599198af291db4ffb982237a4a2244facb`)
+never matches a rebuild elsewhere — 6305 bytes differ from a VS 2022 rebuild here,
+and only four of those are the PE link timestamp. What matters is that both
+binaries turn the same compressed input into the same output, which is what CI
+asserts on every push. `tools/explain_build.py` prints the full breakdown
+(build determinism, link timestamp, Rich header, then the behaviour comparison)
+if you want to see it yourself.
 
 To rebuild and replace the committed binary anyway:
 

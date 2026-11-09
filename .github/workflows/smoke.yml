@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.13"]
+        python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -66,6 +66,9 @@ jobs:
         shell: pwsh
         run: |
           $env:MSIM_VCVARS64 = "${{ steps.msvc.outputs.vcvars }}"
-          python tools/verify_decoder.py
+          # A payload the decompressor really decodes, so the comparison can fall
+          # back to behaviour when the toolchain stamps a different hash.
+          python tools/make_probe.py --out probe.bin --verify
+          python tools/verify_decoder.py --probe probe.bin
       - name: Self check
         run: python selfcheck.py

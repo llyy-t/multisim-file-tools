@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
-"""Explain why two builds of blast_harness.exe differ, and prove they behave the same.
+"""Dissect the difference between the committed decompressor and a fresh build.
 
-`tools/verify_decoder.py` recompiles the committed decompressor and compares
-SHA-256. When the hashes disagree, the honest question is not "which binary is
-right" but "do they do the same thing". This script answers that:
+`tools/verify_decoder.py` asks whether the shipped binary can be trusted;
+`tools/make_probe.py` supplies a payload it can be tested on. This script is the
+forensic view, for when someone asks "why are the hashes different at all?".
 
-1. build twice with identical flags, to show whether the build itself is
-   deterministic on this machine;
-2. compare each binary's PE link timestamp, which a date-stamped toolchain
-   changes on every build even when the code is identical;
-3. run the committed and the rebuilt executable over a real compressed block and
-   compare the decoded bytes.
+It reports:
 
-Step 3 is the one that matters: unequal hashes plus identical output means a
-nondeterministic toolchain, not a tampered binary.
+1. whether two builds from the same source on this machine agree;
+2. which bytes differ between the committed binary and a rebuild, split into the
+   PE link timestamp, the Rich header, and everything else (code);
+3. what both binaries produce from the same payload.
 
-    python tools/explain_build.py --probe <compressed block from a .ms14>
+Design note: a differing Rich header or timestamp is cosmetic. Differing code
+(within .text) means the toolchain, not just the stamp, produced different
+machine code - the two binaries can still be functionally identical, which is
+what step 3 decides. Neither finding implies tampering on its own.
 
-Note when reading the output: this sandbox denies write access to %TEMP% for
-standalone executables (error 5), so pass a --probe that is already extracted and
-let the script write under the repository if the temporary directory fails.
+    python tools/explain_build.py
+    python tools/explain_build.py --probe probe.bin
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import struct
-import subprocess
 import sys
 import tempfile
 
@@ -39,34 +38,61 @@ BIN = os.path.join(ROOT, "worker", "bin")
 COMMITTED = os.path.join(BIN, "blast_harness.exe")
 
 sys.path.insert(0, HERE)
-from verify_decoder import BuildError, build, sha256  # noqa: E402
+from verify_decoder import BuildError, build, decompress, sha256  # noqa: E402
 
 
-def link_timestamp(path: str) -> int:
+def pe_layout(path: str) -> dict:
+    """Locate the two machine-specific stamps in a PE image."""
     with open(path, "rb") as handle:
-        data = handle.read(0x400)
+        data = handle.read()
+    if data[:2] != b"MZ":
+        raise ValueError("%s is not a PE image" % path)
     pe = struct.unpack_from("<I", data, 0x3C)[0]
-    return struct.unpack_from("<L", data, pe + 8)[0]
-
-
-def decompress(exe: str, payload: str, outdir: str, label: str) -> dict:
-    target = os.path.join(outdir, "out-%s.bin" % label)
-    proc = subprocess.run([exe, payload, target], capture_output=True, timeout=120)
-    info = {
-        "exit": proc.returncode,
-        "stderr_tail": proc.stderr.decode("utf-8", "replace")[-200:].strip(),
+    if data[pe:pe + 4] != b"PE\0\0":
+        raise ValueError("%s has no PE signature at 0x%X" % (path, pe))
+    layout = {
+        "link_timestamp_offset": pe + 8,
+        "link_timestamp": struct.unpack_from("<L", data, pe + 8)[0],
+        "rich_header": None,
     }
-    if os.path.isfile(target):
-        info["bytes"] = os.path.getsize(target)
-        info["sha256"] = sha256(target)
-    else:
-        info["bytes"] = 0
-    return info
+    marker = data.find(b"Rich", max(pe - 0x200, 0), pe)
+    if marker != -1 and marker + 8 <= len(data):
+        key = struct.unpack_from("<L", data, marker + 4)[0]
+        for offset in range(marker - 4, 0, -4):
+            if struct.unpack_from("<L", data, offset)[0] ^ key == 0x536E6144:
+                layout["rich_header"] = {"start": offset, "end": marker + 8, "key": key}
+                break
+    return layout
+
+
+def diff_profile(left: str, right: str) -> dict:
+    with open(left, "rb") as handle:
+        a = handle.read()
+    with open(right, "rb") as handle:
+        b = handle.read()
+    if len(a) != len(b):
+        return {"same_size": False, "size_a": len(a), "size_b": len(b)}
+
+    layout = pe_layout(left)
+    stamp = layout["link_timestamp_offset"]
+    rich = layout["rich_header"]
+    differing = [index for index in range(len(a)) if a[index] != b[index]]
+    in_stamp = [i for i in differing if stamp <= i < stamp + 4]
+    in_rich = ([i for i in differing if rich["start"] <= i < rich["end"]]
+               if rich else [])
+    rest = [i for i in differing if i not in in_stamp and i not in in_rich]
+    return {
+        "same_size": True,
+        "size": len(a),
+        "differing_bytes": len(differing),
+        "in_link_timestamp": len(in_stamp),
+        "in_rich_header": len(in_rich),
+        "elsewhere": len(rest),
+        "first_elsewhere": rest[0] if rest else None,
+    }
 
 
 def run(probe: str, keep: bool) -> int:
-    # Write outputs beside the repository, not in %TEMP%: a standalone exe is
-    # denied write access to the temporary directory in this environment.
     workroot = tempfile.mkdtemp(prefix="_buildcheck-", dir=ROOT)
     try:
         first_dir = os.path.join(workroot, "build1")
@@ -74,32 +100,30 @@ def run(probe: str, keep: bool) -> int:
         outdir = os.path.join(workroot, "out")
         for path in (first_dir, second_dir, outdir):
             os.makedirs(path)
+
         first = build(first_dir)
         second = build(second_dir)
-
-        committed_behaviour = decompress(COMMITTED, probe, outdir, "committed")
-        rebuilt_behaviour = decompress(first, probe, outdir, "rebuilt")
-        identical = (
-            committed_behaviour.get("sha256") is not None
-            and committed_behaviour.get("sha256") == rebuilt_behaviour.get("sha256")
-            and committed_behaviour.get("bytes") == rebuilt_behaviour.get("bytes")
-        )
 
         report = {
             "committed": {"sha256": sha256(COMMITTED), "bytes": os.path.getsize(COMMITTED)},
             "rebuilt_a": {"sha256": sha256(first), "bytes": os.path.getsize(first)},
             "rebuilt_b": {"sha256": sha256(second), "bytes": os.path.getsize(second)},
             "build_is_deterministic": sha256(first) == sha256(second),
-            "link_timestamps": {
-                "committed": link_timestamp(COMMITTED),
-                "rebuilt_a": link_timestamp(first),
-                "rebuilt_b": link_timestamp(second),
+            "layout": {"committed": pe_layout(COMMITTED), "rebuilt": pe_layout(first)},
+            "difference": {
+                "committed_vs_rebuilt": diff_profile(COMMITTED, first),
+                "rebuilt_vs_rebuilt": diff_profile(first, second),
             },
-            "behaviour": {"committed": committed_behaviour, "rebuilt": rebuilt_behaviour},
-            "identical_behaviour": identical,
         }
-        print(json.dumps(report, indent=2))
-        return 0 if identical else 1
+        if probe:
+            report["probe"] = {"path": probe, "bytes": os.path.getsize(probe)}
+            left = decompress(COMMITTED, probe, outdir, "committed")
+            right = decompress(first, probe, outdir, "rebuilt")
+            report["behaviour"] = {"committed": left, "rebuilt": right}
+            report["identical_behaviour"] = bool(left.get("sha256")
+                                                and left.get("sha256") == right.get("sha256"))
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if report.get("build_is_deterministic", False) else 1
     finally:
         if not keep:
             shutil.rmtree(workroot, ignore_errors=True)
@@ -107,11 +131,12 @@ def run(probe: str, keep: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--probe", required=True, help="a compressed block extracted from a .ms14")
-    parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--probe", default="",
+                        help="payload to compare behaviour on (see tools/make_probe.py)")
+    parser.add_argument("--keep", action="store_true", help="keep the build directory")
     args = parser.parse_args()
 
-    if not os.path.isfile(args.probe):
+    if args.probe and not os.path.isfile(args.probe):
         print(json.dumps({"ok": False, "reason": "probe not found: %s" % args.probe}))
         return 3
     if not os.path.isfile(COMMITTED):

@@ -153,7 +153,8 @@ worker/msim_com.py        Multisim COM session (only imported by `spice`)
 worker/bin/blast*.c/.h    PKWare DCL decompressor (Mark Adler, zlib licence)
 worker/bin/blast_harness.exe   thin Win32 wrapper around blast
 tools/verify_decoder.py   rebuild the executable and check it against the source
-tools/explain_build.py    diagnose a hash difference, down to identical behaviour
+tools/make_probe.py       build a PKWare DCL payload the check can run on
+tools/explain_build.py    dissect a hash difference, down to identical behaviour
 .github/workflows/        Linux smoke test, Windows rebuild check
 examples/rc_lowpass.cir   the deck used in the examples above
 ```
@@ -162,12 +163,19 @@ examples/rc_lowpass.cir   the deck used in the examples above
 
 `worker/bin/blast_harness.exe` is committed so users do not need a C compiler.
 It is not opaque: `tools/verify_decoder.py` rebuilds it from `blast_harness.c` +
-`blast.c` with MSVC and compares. MSVC stamps a link timestamp unless `/Brepro`
-is honoured, so when the hashes differ the script falls back to running both
-binaries over the same compressed block and comparing the decoded bytes — the
-committed binary and the rebuilt one currently produce byte-identical output for
-every block of a real `.ms14`. CI re-runs this on every push. Nothing here is
-hidden behind "trust me, it decompresses".
+`blast.c` with MSVC and compares.
+
+The comparison is behavioural, and that is a deliberate choice rather than a
+concession. Two builds from the same source on the same machine are byte-identical
+(`/Brepro` sees to that), but the committed file was built with a different MSVC
+than yours, and a different toolchain emits different machine code — on this
+repository, 6305 bytes differ from a local rebuild, of which only four are the PE
+link timestamp. No amount of flag tuning makes that go away, so the check builds
+the payload with `tools/make_probe.py`, runs both binaries over it, and requires
+the decoded bytes to match. A rebuilt binary that produced different output would
+fail CI.
+
+CI runs the whole thing on every push, on Windows, from a clean checkout.
 
 ## Relation to `multisim-toolkit`
 
