@@ -1,0 +1,8 @@
+# The only dependency this tool has is pywin32, and only for `spice`.
+# `design`, `netlist` and `check` run on a bare Python 3.9+.
+#
+# pywin32 must be installed into a 32-BIT Python 3.11-3.13 interpreter, because
+# Multisim's COM automation server is 32-bit. Installing it into a 64-bit
+# interpreter will not help:
+#     C:\path\to\Python313-32\python.exe -m pip install pywin32
+pywin32>=306; sys_platform == "win32"

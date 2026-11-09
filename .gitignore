@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+_ms14_tmp/
+.msim-ms14-tmp/
+runs/
+*.ms14.bak
+.DS_Store
+Thumbs.db
