@@ -144,6 +144,7 @@ tool cannot do that step itself, because it does not drive the application.
 ```
 cli.py                    command line entry point, JSON in/out
 SKILL.md                  the agent-facing instructions
+selfcheck.py              environment + smoke test, no Multisim needed
 worker/msim_ms14.py       .ms14 container: decompress, parse, summarise
 worker/msim_spice.py      SPICE deck parsing, ASCII raw parsing, CSV, plotting
 worker/msim_raster.py     PNG canvas and bitmap font, for charts
@@ -151,8 +152,22 @@ worker/msim_deck.py       deck + analyses -> commands -> raw -> tables
 worker/msim_com.py        Multisim COM session (only imported by `spice`)
 worker/bin/blast*.c/.h    PKWare DCL decompressor (Mark Adler, zlib licence)
 worker/bin/blast_harness.exe   thin Win32 wrapper around blast
+tools/verify_decoder.py   rebuild the executable and check it against the source
+tools/explain_build.py    diagnose a hash difference, down to identical behaviour
+.github/workflows/        Linux smoke test, Windows rebuild check
 examples/rc_lowpass.cir   the deck used in the examples above
 ```
+
+### About the shipped executable
+
+`worker/bin/blast_harness.exe` is committed so users do not need a C compiler.
+It is not opaque: `tools/verify_decoder.py` rebuilds it from `blast_harness.c` +
+`blast.c` with MSVC and compares. MSVC stamps a link timestamp unless `/Brepro`
+is honoured, so when the hashes differ the script falls back to running both
+binaries over the same compressed block and comparing the decoded bytes — the
+committed binary and the rebuilt one currently produce byte-identical output for
+every block of a real `.ms14`. CI re-runs this on every push. Nothing here is
+hidden behind "trust me, it decompresses".
 
 ## Relation to `multisim-toolkit`
 

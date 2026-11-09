@@ -1,0 +1,71 @@
+name: smoke
+
+# The decompressor is verified on Windows because that is the only place MSVC and
+# NI Multisim 14.3 exist. Everything else runs on plain Linux: `design` and
+# `netlist` are pure Python and must keep working on a machine with no Windows,
+# no Multisim and no pywin32.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  portable:
+    name: design + netlist (no Multisim)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Self check
+        run: python selfcheck.py
+      - name: Netlist round trip
+        run: |
+          python cli.py netlist examples/rc_lowpass.cir -o "$RUNNER_TEMP/out.cir"
+          python cli.py netlist examples/rc_lowpass.cir --pretty
+      - name: check reports the missing pieces instead of crashing
+        run: |
+          set +e
+          python cli.py check
+          test $? -eq 0
+      - name: spice fails cleanly without pywin32
+        run: |
+          set +e
+          python cli.py spice examples/rc_lowpass.cir -c op -o "$RUNNER_TEMP/run" > spice.json
+          status=$?
+          set -e
+          test $status -eq 1
+          grep -q NO_PYWIN32 spice.json
+
+  windows:
+    name: decompressor verifies against its source
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Find MSVC
+        id: msvc
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $install = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $install) { throw "no MSVC toolset found" }
+          "vcvars=$install\VC\Auxiliary\Build\vcvars64.bat" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Rebuild and compare
+        shell: pwsh
+        run: |
+          $env:MSIM_VCVARS64 = "${{ steps.msvc.outputs.vcvars }}"
+          python tools/verify_decoder.py
+      - name: Self check
+        run: python selfcheck.py

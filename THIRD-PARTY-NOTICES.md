@@ -20,12 +20,42 @@ distribute for any purpose, provided the notice is retained and the author is
 not misrepresented as the origin of the software.
 
 `worker/bin/blast_harness.c` is original work in this project and is MIT
-licensed like the rest of it. Rebuild command (MSVC):
+licensed like the rest of it.
+
+### Is the shipped binary the one this source produces?
+
+`tools/verify_decoder.py` recompiles `blast_harness.c` + `blast.c` with MSVC and
+compares the result against the committed `worker/bin/blast_harness.exe`:
+
+```bash
+python tools/verify_decoder.py
+```
+
+MSVC's linker writes a timestamp into the PE header, so a plain hash comparison
+is only expected to agree on toolchains that honour `/Brepro`. When the hashes
+differ the script does not stop there — it runs both executables over the same
+real compressed block and compares the decoded bytes, which is the property that
+actually matters. `tools/explain_build.py` shows the difference in detail (build
+determinism, link timestamps, then the same behavioural comparison).
+
+As of the current commit the two binaries have different hashes and **identical
+decompressed output** for every block of a real `.ms14`: the build is
+deterministic on this machine (two builds agree with each other) but differs from
+the committed artefact by the link timestamp. CI runs the rebuild on every push.
+
+To rebuild and replace the committed binary anyway:
+
+```powershell
+$env:MSIM_VCVARS64 = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+python tools/verify_decoder.py --keep   # inspect, then copy the rebuilt exe if you prefer it
+```
+
+or by hand (MSVC):
 
 ```bat
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 cd worker\bin
-cl /nologo /O2 /Fe:blast_harness.exe blast_harness.c blast.c
+cl /nologo /O2 /Brepro /Fe:blast_harness.exe blast_harness.c blast.c
 ```
 
 ## National Instruments / Emerson — Multisim
